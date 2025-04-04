@@ -1,10 +1,9 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from pydantic_settings import BaseSettings, SettingsConfigDict
 import json
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
-from urllib.parse import quote_plus
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 app = FastAPI()
 
@@ -27,16 +26,14 @@ class Settings(BaseSettings):
     model_name: str
     ollama_url: str
 
-# Input Schema
-class RequestModel(BaseModel):
-    code_diff: str
-    user_instruction: str
-
-# Response Schema
+# Response Schema for plain text
 class ResponseModel(BaseModel):
     response: str
 
 settings = Settings()
+
+# Unique delimiter to separate diff and user instructions
+DELIMITER = "-----END_OF_DIFF-----"
 
 prompt_template = """
     You are tasked with generating a professional and concise commit message for a code change. 
@@ -86,7 +83,6 @@ prompt_template = """
     """
 
 async def get_response(prompt: str):
-    
     payload = {
         "model": settings.model_name,
         "prompt": prompt,
@@ -127,27 +123,36 @@ async def get_response(prompt: str):
 def generate_prompt(code_diff: str, user_instruction: str):    
     # Format the prompt with the provided inputs
     prompt = prompt_template.format(code_diff=code_diff, user_instruction=user_instruction)
-
     return prompt.strip()
 
-
-@app.post("/generate", response_model=ResponseModel)
-async def generate_text(request: RequestModel):
+@app.post("/generate", response_model=str)  # Return plain text
+async def generate_text(request: Request):
     try:
-        # create prompt from the input
-        prompt = generate_prompt(request.code_diff, request.user_instruction)
+        # Read the raw text body of the request
+        raw_text = await request.body()
+        raw_text = raw_text.decode('utf-8')  # Decode bytes to string
+
+        # Split the input into code_diff and user_instruction using the delimiter
+        parts = raw_text.split(DELIMITER, 1)
+        if len(parts) != 2:
+            raise HTTPException(status_code=400, detail="Invalid input format. Expected 'diff' and 'user_instruction' separated by a delimiter.")
+
+        code_diff, user_instruction = parts
+
+        # Create the prompt
+        prompt = generate_prompt(code_diff.strip(), user_instruction.strip())
         
-        # capture response
+        # Capture the response
         response = await get_response(prompt)
-        
+        print(response)
         response = response.strip()
 
         if len(response) == 0:
             print("No response... Trying again")
             response = await get_response(prompt)
 
-        # Return the generated response
-        return ResponseModel(response=response)
+        # Return the generated response as plain text
+        return response
     
     except HTTPException as e:
         raise e
